@@ -1,3 +1,5 @@
+from typing import List, Type
+
 from aiogram import types
 from aiogram.dispatcher import Dispatcher, FSMContext
 from aiogram.dispatcher.filters import Text
@@ -11,6 +13,9 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardBut
 from create_bot import ADMINS, bot
 from keyboards.admin_kb import main_kb, button3
 import validators
+from config import config
+import typing as tp
+from db.db import Users, Bans, engine, get_session
 
 
 class FSMMakePost(StatesGroup):
@@ -35,20 +40,26 @@ video_kb = InlineKeyboardMarkup().add(in_btn1).add(in_btn2).add(in_btn4)
 link_kb = InlineKeyboardMarkup().add(in_btn1).add(in_btn2).add(in_btn3)
 
 in_main_kb = InlineKeyboardMarkup().add(in_btn1).add(in_btn2).add(in_btn3).add(in_btn4)
-callback_data = [i[0].callback_data for i in in_main_kb["inline_keyboard"]]
 
 edit_mod_kb = ReplyKeyboardMarkup(resize_keyboard=True)
 edit_mod_kb.row(button1, button2)
 
-test_id = "AgACAgIAAxkBAAIE_WFwPsU5q-hKretiDX3T9mwW_PnqAAIEtzEbn5GASwXjo_gexnX0AQADAgADcwADIAQ"
-post = {}
+
+def get_users():
+    session = get_session(engine)
+    users = session.query(Users).all()
+    ban_users = session.query(Bans).all()
+    ban_users = [user.id for user in ban_users]
+    users = [user.id for user in users if user.id not in ban_users]
+    return users
 
 
-async def edit_mod(msg: types.Message):
-    post["title"] = ""
-    post["photos"] = []
-    post["videos"] = []
-    post["links"] = []
+async def edit_mod(msg: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data["title"] = ""
+        data["photos"] = []
+        data["videos"] = []
+        data["links"] = []
     await msg.reply(text="Вы в режиме публикации", reply_markup=edit_mod_kb, reply=False)
     await msg.reply(text="Добавить:", reply_markup=in_main_kb, reply=False)
 
@@ -72,7 +83,8 @@ async def set_state_photo(callback_query: types.CallbackQuery):
 
 async def set_state_video(callback_query: types.CallbackQuery):
     await FSMMakePost.video.set()
-    await bot.edit_message_text(text="Жду видео", chat_id=callback_query.from_user.id, message_id=callback_query.message.message_id, reply_markup=video_kb)
+    await bot.edit_message_text(text="Жду видео", chat_id=callback_query.from_user.id,
+                                message_id=callback_query.message.message_id, reply_markup=video_kb)
 
 
 async def set_state_link(callback_query: types.CallbackQuery):
@@ -80,81 +92,87 @@ async def set_state_link(callback_query: types.CallbackQuery):
     await FSMMakePost.link.set()
 
 
-async def add_title(msg: types.Message):
-    post["title"] = msg.text
+async def add_title(msg: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data["title"] = msg.text
     await msg.reply("Текст получил", reply_markup=title_kb)
 
 
-async def add_photo(msg: types.Message):
+async def add_photo(msg: types.Message, state: FSMContext):
     photo = msg.photo.pop().file_id
-    post["photos"].append(photo)
+    async with state.proxy() as data:
+        data["photos"].append(photo)
     await msg.reply("Фото получил. Можно загрузить еще", reply_markup=photo_kb)
 
 
-async def add_video(msg: types.Message):
+async def add_video(msg: types.Message, state: FSMContext):
     video = msg.video.file_id
-    post["videos"].append(video)
+    async with state.proxy() as data:
+        data["photos"].append(video)
     await msg.reply("Видео получил. Можно загрузить еще", reply_markup=video_kb)
 
 
-async def add_link(msg: types.Message):
+async def add_link(msg: types.Message, state: FSMContext):
     link = msg.text
     if not validators.url(link):
         await msg.reply("Некорректная ссылка", reply_markup=link_kb)
     else:
-        post["links"].append({"link": link})
+        async with state.proxy() as data:
+            data["links"].append({"link": link})
         await msg.reply("Ссылку получил", reply_markup=link_kb)
         await FSMMakePost.link_title.set()
         await msg.reply("Жду название ссылки")
 
 
-async def pin_links(msg: types.Message):
-    Chat = await bot.send_message(chat_id=msg.from_user.id, text="12323")
-    print(Chat)
+async def add_link_title(msg: types.Message, state: FSMContext):
+    title = msg.text
+    async with state.proxy() as data:
+        data["links"][-1]["title"] = title
+    await FSMMakePost.link.set()
+    await msg.reply("Ссылка сформирована. Можно добавить еще!", reply_markup=link_kb)
 
 
-async def view_post(post, chat_id):
-    text = post["title"] if post["title"] else None
-    videos = list(set(post["videos"]))
-    photos = list(set(post["photos"]))
-    print((photos))
-    links = post["links"]
-    inline_kb = InlineKeyboardMarkup()
-    if links:
-        for link in links:
-            btn = InlineKeyboardButton(text=link["title"], url=link["link"])
-            inline_kb.add(btn)
+async def post_sender(session, chat_id, text, videos, photos, links):
     if videos or photos:
         if len(videos) + len(photos) == 1:
             if videos:
-                await bot.send_video(chat_id=chat_id, video=videos[0], caption=text, reply_markup=inline_kb)
+                bot_msg = await bot.send_video(chat_id=chat_id, video=videos[0], caption=text)
+                print(bot_msg.message_id)
             if photos:
-                print(photos)
-                print(photos[0])
-                await bot.send_photo(chat_id=chat_id, photo=photos[0], caption=text, reply_markup=inline_kb)
+                bot_msg = await bot.send_photo(chat_id=chat_id, photo=photos[0], caption=text)
+                print(bot_msg.message_id)
         elif len(videos) + len(photos) > 1:
             media = []
             for video in videos:
                 media.append(InputMedia(InputMediaVideo(video)))
             for photo in photos:
                 media.append(InputMediaPhoto(photo))
-            media[0]["caption"]=text
-            msg_post = await bot.send_media_group(chat_id=chat_id, media=media)
-            msg_link = await bot.send_message(chat_id=chat_id, text="Прикрепленные ссылки:", reply_markup=inline_kb)
-            # await bot.edit_message_reply_markup(chat_id=chat_id, message_id=msg[0].message_id, reply_markup=inline_kb)
-            # await msg_post[0].reply("Ссылка")
-
-
-async def add_link_title(msg: types.Message):
-    title = msg.text
-    post["links"][-1]["title"] = title
-    await msg.reply("Ссылка сформирована", reply_markup=link_kb)
+            media[0]["caption"] = text
+            bot_msg = await bot.send_media_group(chat_id=chat_id, media=media)
+    if links:
+        links_kb = InlineKeyboardMarkup()
+        for link in links:
+            title = link["title"]
+            link = link["link"]
+            links_kb.add(InlineKeyboardButton(text=title, url=link))
+        links_msg = await bot.send_message(chat_id=chat_id, text="Прикрепленные ссылки:", reply_markup=links_kb)
 
 
 async def send_post(msg: types.Message, state: FSMContext):
-    await state.finish()
-    await view_post(post, chat_id=msg.from_user.id)
-    await msg.reply(text="Пост отправлен", reply_markup=main_kb, reply=False)
+    session = get_session(engine)
+    async with state.proxy() as data:
+        text = data["title"] if data["title"] else ""
+        videos = list(set(data["videos"]))
+        photos = list(set(data["photos"]))
+        links = data["links"]
+    if len(photos)+len(videos) > 10:
+        await msg.reply(text="Будут отправлены первые 10 медиа ⚠️", reply=False)
+    if not text and not videos and not photos:
+        await msg.reply(text="Мало информации", reply_markup=in_main_kb, reply=False)
+    else:
+        await state.finish()
+        await post_sender(chat_id=2044572933, text=text, videos=videos, photos=photos, links=links)
+        await msg.reply(text="Пост отправлен", reply_markup=main_kb, reply=False)
 
 
 def register_handlers_make_posts(dp: Dispatcher):
@@ -197,6 +215,3 @@ def register_handlers_make_posts(dp: Dispatcher):
 
     dp.register_message_handler(add_link_title, lambda msg: msg["from"]["id"] in ADMINS and msg.text,
                                 state=FSMMakePost.link_title)
-
-    dp.register_message_handler(pin_links, lambda msg: msg["from"]["id"] in ADMINS, commands=["test"],
-                                state="*")
